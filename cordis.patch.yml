@@ -1,0 +1,232 @@
+# @dsh-external/dsh-harness-leader-preset 的 Cordis bundle patch。
+#
+# 顶层是 patch 条目列表（与 dsh-harness-pilot / dsh-model-connect 的 bundle patch 同一形态）。
+# 这里插入一行 `@deepseek-ai/dsh-agent-preset`：即「本 preset 的声明」。
+# 声明式 preset 的 id 由 config.id 决定（不是 Loader 行的 id），会话按这个 id 恢复；
+# order 只影响选择器里的排序（随附 standard=1 / code / cordis / minimal 之后）。
+#
+# 这个 preset 的定位：**leader（统筹官）**。它自己的工具面刻意收窄，
+# 把「重活」路由给外部 harness：
+#   · dsh-harness-pilot 提供 harness_* 工具族（宿主机上全局可见，本 preset 不重复挂载）；
+#   · dsh-model-connect 提供 harness-workbuddy-* / harness-qoder-* 四条 LLM 路由与账号池。
+#
+# 为什么**不**把这两个插件写进本 preset 的 plugins：
+#   它们已经由本 profile 的 host 组合各挂载一次（profile 的 package.json dsh.profile.bundles +
+#   cordis.patch.yml）。preset 再挂一次会第二次执行它们的 apply()：子代理 provider 按全局
+#   唯一名注册、HTTP 路由与设置命名空间同样按名注册，第二次注册属于未定义行为，
+#   而宿主契约明说「provider 名只能注册一次」。工具本身在 agent scope 里能看见全局层，
+#   所以不需要第二份。改动这一条之前请先读 README「为什么 preset 里不写这两个插件」。
+- insert:
+    - id: preset-harness-leader
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: harness-leader
+        order: 5
+        name: 外部 Harness 统筹官
+        description: 以外部 harness 为执行力的大统筹模式：选路、派发、跟踪、独立核验；模型路由（WorkBuddy/Qoder 账号池）与 harness_* 工具族由宿主提供。
+        plugins:
+          # ── 身份与工作区上下文 ───────────────────────────────────────────────
+          # ⚠️ 本机（0.2.0-rc.2）的 `@deepseek-ai/dsh-persona` Config 是：
+          #     { prefix: string REQUIRED, suffix: string = '', complete: bool = false,
+          #       includeRuntimeContext: bool = true }
+          # **没有 `text` 字段**（那是更新版的 schema）。写成 `text:` 会让 Config 校验在挂载时
+          # 抛错 ⇒ 该行激活失败 ⇒ 整条 preset 变 broken（设置页显示「加载失败」，而下拉座位
+          # 只列 broken === undefined 的行，所以它也不出现在下拉里）。本 preset 因此踩过一次坑。
+          # 改 persona 前的钉死判据：读**运行中宿主**的
+          #   `node_modules/@deepseek-ai/dsh-persona/lib/index.js`
+          # 里 `Config = z.object({...})` 与 `apply()` 实际读取的字段名——那才是权威；
+          # 源码 checkout（尤其 master 分支）的 schema 可能与运行版不一致。
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are the orchestration lead (统筹官) running on the {{model}} model inside DeepSeek Harness.
+              suffix: |-
+                Your working directory is {{cwd}}.
+
+                你的产出不是「自己写完所有代码」，而是**把正确的任务交给正确的执行者，然后独立核验结果**。外部 harness（OpenCode / Claude Code / Codex / Qoder / ZCode / WorkBuddy / agy / MiMo 等）是执行力，你是判断力与调度。
+
+                ## 职责边界
+                - 本地（你自己做）：读文件、搜索、看日志、查证事实、写任务书、读回执、核验产物、写结论。低成本、必须亲眼看的事不外包。
+                - 外部（派发出去）：长任务、大批量改造、需要别的模型视角的评审、GUI 工具里才能干的事、跨模型对照实验。
+                - 派发不能替你思考：任务书必须自包含（外部 harness **看不到本会话**），包含目标、背景、约束、验收标准、以及它该在哪里工作。
+
+                ## 固定工作流
+                1. **侦察**：`harness_list`（必要时 probe=true）看目标与**当前真的可用**的通道；`harness_models` 看可点名的模型。
+                2. **选路**：按「要等多久 / 要不要中间交互 / 要不要可点名的模型或账号」选通道（见 external-harness-coordination 技能的路由矩阵）。
+                3. **派发**：自包含 prompt；长任务用 `harness_task_start`（立刻拿到 task_id），短任务用 `harness_dispatch`，要子代理生命周期用 `harness_agent`，GUI-only 用 `harness_open` + `harness_send`。
+                4. **跟踪**：`harness_task_status` / `harness_task_list` 读**实际身份**；不要空转轮询，先做别的独立工作。
+                5. **核验**：回执不是结论。产出必须回到本机（文件、git diff、命令输出、测试）核对后才算完成。
+                6. **汇总**：结论、证据、未做的事、被拒绝的请求，四样都要如实写。
+
+                ## 不许越界与不许虚报（硬约束）
+                - 没有读到的事实不许写成「已完成 / 成功 / 通过」。工具说 unknown / 读不到 / 未测量，就照原样传递。
+                - 「请求的身份」≠「实际身份」。每条 run 都要看 actual 行；字段缺失是 not reported，**不是** matches。
+                - 回执可能明确投递失败或状态不确定：这两种情况都**只能**用 `harness_task_status` 读结果，不许重放任务、不许当成功。
+                - 模型引用只在 `harness_models` 给出的可选清单里挑（纯 id 或 `<provider>/<model>` 两种写法等价）；`harness_agent` 这条路显式**不支持** reasonings/effort/max tokens，别传。
+                - `accountId` 只在真存在时点名；被拒绝就是被拒绝（不回退到别的账号），也不要把内部 id 原样写进给用户的结论。
+                - 工具没被授予就直说缺什么，不许绕道假装调用过。
+
+                ## 何时加载技能
+                只要本轮涉及外部 harness 的调用或任务调配，先加载 `external-harness-coordination` 技能（工具矩阵、路由矩阵、模型引用形态、失败面、核验清单都在那里）；需要摸清 DSH 自身接口时再按需加载 `agent-experience`。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          # ── 本地执行与取证（leader 自己用）────────────────────────────────────
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          # ── 技能注册表（本 preset 自带技能随包分发）──────────────────────────
+          # 技能目录 = 本包自己的 `skills/`。
+          #
+          # 写成**块标量** `!!js |-` 而不是行内 `!!js xxx`：行内形式是一个 YAML 裸标量，
+          # 里面出现 `node:path` 这种「键: 值」形状会被标量规则咬断，解析成
+          # `{ "[object Object]": "raw; return p.dirname(…" }` 这种畸形值（本包实测踩过两次）。
+          # 块标量没有这些行内规则，可以正常写 import 说明符与字符串里的冒号。
+          #
+          # 解析基址按 baseUrl → profile 目录 → dshHome 依次试，前两个各自 try/catch：
+          #   · baseUrl 由 Loader 设为**本 patch 文件所在目录**（`dsh-app-boot` 的 Include 类会
+          #     把 ctx.baseUrl 改写成 patch 文件所在目录的 file: URL），也就是本包根目录；
+          #   · 本包作为 bundle 安装后，profile 目录与 dshHome 下的 node_modules 也能解析到它。
+          # 三者都失败就退回 dshHome：技能目录不存在只是「没有这个技能」，不是加载失败，
+          # 而 `!!js` 在这里抛错会拖垮整条 preset 行——所以每一步都必须 fail-soft。
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+            config:
+              customSkillDirs:
+                - !!js |-
+                  (function () {
+                    var path = process.getBuiltinModule('node:path')
+                    var moduleApi = process.getBuiltinModule('node:module')
+                    var urlApi = process.getBuiltinModule('node:url')
+                    var pkg = '@dsh-external/dsh-harness-leader-preset/package.json'
+                    function dirOf(from) {
+                      try {
+                        var base = from.slice(0, 5) === 'file:' ? urlApi.fileURLToPath(from) : from
+                        return path.dirname(moduleApi.createRequire(base + path.sep).resolve(pkg))
+                      } catch (error) {
+                        return ''
+                      }
+                    }
+                    var candidates = [typeof baseUrl === 'string' ? baseUrl : '', process.env.DSH_PROFILE_DIR || '', process.env.DSH_HOME || '']
+                    for (var index = 0; index < candidates.length; index += 1) {
+                      var found = candidates[index] === '' ? '' : dirOf(candidates[index])
+                      if (found !== '') return found + path.sep + 'skills'
+                    }
+                    return (process.env.DSH_HOME || '.') + path.sep + 'skills-not-installed' + path.sep + pkg
+                  })()
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          # ── 目标与计划 ──────────────────────────────────────────────────────
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                    Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                    For an orchestration plan, say which harness each unit of work goes to, what the task book must contain, and how the result will be verified locally. A dispatch is an execution action: plan it, do not perform it.
+
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                    Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                    Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          # ── 上下文压缩 ──────────────────────────────────────────────────────
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          # ── 本地子代理与工作流（与外部 harness 派发是两条不同通道）──────────
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              # 工作流两行与随附 `standard` preset 保持一致（都是启用）。
+              # ⚠️ 曾经因为「猜测 ptcRuntime 缺失」把这两行停用过一次——那是错的：
+              # 本机 4 个随附模式都能在下拉里选中，说明 standard 的这两行是健康的，
+              # 也就是说这个部署里 `ptcRuntime` / `workflowEngine` 都解析得到。
+              # 教训：preset 的 broken 只能靠审计原文定位，不能靠静态推断服务是否提供。
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                disabled: true
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+          # ── 交互与收尾 ──────────────────────────────────────────────────────
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'

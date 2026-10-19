@@ -1,0 +1,20 @@
+{
+  "name": "@dsh-external/dsh-harness-leader-preset",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH Agent preset：把本机 DSH 模型变成外部 harness 的统筹官（leader）——配合 dsh-harness-pilot 的 harness_* 工具族与 dsh-model-connect 的账号型模型路由，做选路、派发、跟踪与独立核验",
+  "type": "module",
+  "files": [
+    "cordis.patch.yml",
+    "skills"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-rc.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
